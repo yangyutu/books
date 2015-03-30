@@ -1,0 +1,481 @@
+Lifting the Earth using Linux Making life better using better knowledge of Linux
+Skip to content
+Home
+About
+← Understanding Linux block IO barriersUsing the VMware workstation emulated serial port on a Linux host →
+Linux Kernel and Floating Point
+Posted on April 25, 2010 by
+Consider the following kernel module code snippet that does a floating point divide. (The complete module code is here).
+
+static noinline double dummy_float_divide(double arg1, double arg2)
+{
+    return (arg1 / arg2);
+}
+
+
+When we compile the given module, we get.
+
+
+CC [M]  /home/lsmiths/linux_kernel_fp_support/fp.o
+Building modules, stage 2.
+MODPOST 1 modules
+WARNING: "__divdf3" [/home/lsmiths/linux_kernel_fp_support/fp.ko] undefined!
+CC      /home/lsmiths/linux_kernel_fp_support/fp.mod.o
+LD [M]  /home/lsmiths/linux_kernel_fp_support/fp.ko
+
+An attempt to load this module fails with the following error in dmesg.
+
+
+fp: Unknown symbol __divdf3
+
+__divdf3 sounds like a function for dividing floating point numbers, but how did it make it to our module. We never used it! 
+
+
+Disassmbling the module object (objdump -d fp.o), yields
+
+
+00000000 <dummy_float_divide>:
+ 0:   55                      push   %ebp
+ 1:   89 e5                   mov    %esp,%ebp
+ 3:   83 ec 10                sub    $0x10,%esp
+ 6:   8b 45 10                mov    0x10(%ebp),%eax
+ 9:   8b 55 14                mov    0x14(%ebp),%edx
+ c:   89 44 24 08             mov    %eax,0x8(%esp)
+10:   8b 45 08                mov    0x8(%ebp),%eax
+13:   89 54 24 0c             mov    %edx,0xc(%esp)
+17:   8b 55 0c                mov    0xc(%ebp),%edx
+1a:   89 04 24                mov    %eax,(%esp)
+1d:   89 54 24 04             mov    %edx,0x4(%esp)
+21:   e8 fc ff ff ff          call   22 <dummy_float_divide+0x22> <--- This may be the __divdf3 call
+26:   c9                      leave
+27:   c3                      ret
+
+Lets confirm it by looking at the relocation table
+
+
+readelf -r fp.o output has the following.
+
+
+﻿Relocation section '.rel.text' at offset 0x3ee0 contains 1 entries:
+Offset     Info    Type            Sym.Value  Sym. Name
+00000022  00001902 R_386_PC32        00000000   __divdf3 <-- The assembly code above references this function
+
+So what is happening is that, gcc replaced the expression (arg1/arg2) by a call to __divdf3 function which is supposed to carry out the floating point division using integer arithmetic.
+
+
+Why did gcc do that ? and not generate actual assembly instructions to do floating point divide.
+
+
+This is because, the module code was compiled with -msoft-float gcc option, which instructs gcc to not generate floating point assembly instructions and instead generate calls to the glibc s/w floating point emulation functions. 
+-msoft-float is useful when compiling programs for platforms that do not have hardware floating point support. Nothing is wrong with this. Infact if you compile an equivalent user program with -msoft-float, it should work 
+(pls read note below)
+
+
+P.S. Actually it depends on whether your glibc is compiled with software floating point emulation support. Usually x86 based default  glibc distributions come w/o soft floating point emulation, as almost all x86 platforms
+have h/w floating point support. If h/w floating point  support is present, it is preferred because of its speed and the fact that it puts less load on the CPU (for applications with extensive floating point usage,
+f.e. sone gaming applications or CAD design applications etc).
+
+
+You can use the following command to see if your glibc distribution has software floating point emulation support
+
+
+#  ldd /bin/ls  | grep libc | awk '{print $3}' | xargs readlink -f | xargs nm -D | grep __divdf3
+
+I believe the reason why default glibc does not come with soft float support enabled, is to prevent applications from accidentally using soft float.
+Otherwise if some application is unintentionally compiled with -msoft-float, the user will never know and the application will be using the inefficient soft float, even though h/w float support is available :-(
+
+
+So, till now we know the following things :
+
+
+
+Linux kernel (and all its modules) are compiled with -msoft-float gcc option (to know why, read on)
+
+Linux kernel (and all its modules) are _not_ linked with glibc and hence we do not have access to soft floating point emulation functions (like __divdf3).
+
+Linux kernel itself does not provide its own implementation of __divdf3 (and other soft floating point functions).
+
+
+The above explains why we get the error while compiling and loading the module, but the inquisitive of us will still be having few questions. Lets try to find answers to those questions.
+
+
+What is floating point and how is it handled ?
+
+
+Before we get into the main topic of the discussion, i.e. the state of floating point support in Linux, and the reasons behind that, lets take a quick look at what it takes to support floating point operations.
+
+
+Floating point usage is not very common. So much so that x86 designers did not make the floating point unit (the CPU real estate needed for floating point operations) part of the original CPU.
+In-fact floating point instructions were supported by a special coprocessor. For the 8086 this was called 8087. Similarly for other 80×86 processors the corresponding floating point coprocessor was called 80×87.
+Till the 80386 processor, this coprocessor came as a separate chip which used to sit alongside the main CPU and all the floating point calculations were directed to it,
+which then could use its floating point unit (FPU) to do the calculations and pass the result back to the main processor.
+Starting 80486, the FPU was integrated with the main CPU, but still the FPU was a logically separate unit, i.e. it used a separate register set to load/store the floating point values
+and it used a different ALU for carrying out the floating point calculations.
+
+
+The reason for keeping the FPU separate is twofold.
+
+
+
+floating point operations are very rarely used, and
+
+floating point operations are expensive.
+
+
+This design has a very important impact on how floating point is handled in the present operating systems. Had the floating point support been native to a processor,
+just like the integer support, then it would not be treated any differently and we would use them just like we use the integer operations. This blog would not exist !
+
+
+In this article, wherever necessary, we will take the x87 FPU as an example, but all this should apply to any other processor and its corresponding FPU.
+
+
+Other ways of handling floating point
+
+
+What we just discussed above is called the hardware floating point support, as the floating point operations are handled in the hardware. 
+Since the FPU is separate from the processor there is a possibility that we do not have the FPU in a certain system.
+Note that this does not apply to modern x86 based systems since FPU comes on the same die as the main processor, so if you buy the processor, you get the FPU also.
+Other architectures, especially those used for embedded system design, might still make the FPU as an add-on for cost reasons. In such cases,
+where the FPU is not present in the system and we need to still do a few floating point calculations, we have the following options.
+
+
+Do not use floating point
+
+
+Instead use the fixed point arithmetic using integer operations. This can be used if our floating point usage is not much and we do not need very high precision.
+Also, every application does it in its own way leading to lots of inconsitencies and possible errors.
+
+
+Use a floating point emulation library
+
+
+The application program written in high-level language uses the floating point operations as-is, but the compiler, instead of generating floating point instructions for them,
+generates calls to the floating point emulation functions. These emulation functions are provided by some library, against which the program is then linked. 
+The GNU C Library glibc also comes with support for floating point emulation. Note that the default glibc distribution might not have the floating point emultion (FPE) support,
+but glibc has a configure option using which we can compile glibc with FPE support.
+
+
+This needs support from the compiler, as it has to identify floating point operations and generate FPE calls for them. Usually compilers provide some commandline option for this.
+gcc provides the -msoft-float option for this purpose. This is not the default and w/o this option gcc generates floating point instructions.
+
+
+Kernel floating point emulation
+
+
+If we need to emulate floating point operations and we want to hide it from the applications, we can have the kernel emulate them.
+This can be kept completely transparent from the applications and they won’t even know if the underlying processor has a h/w FPU or not, but for the slowness that it might cause.
+
+
+This is implemented by the CPU generating an exception every time it encounters a floating point instruction, and the kernel exception handler then emulating the instruction using integer arithmetic.
+
+
+For this we need support from the CPU, i.e. it should generate an exception on encountering a floating point instruction. x86 processors provide this support by means of an Emulation bit (bit #2 in CR0 register).
+If the h/w FPU is not present then this bit will be set.  When the Emulation bit (abbreviated as EM)  is set, the x86 CPU will raise the Device Not Available (#NM) exception every single time
+it encounters a floating point instruction. A Linux kernel compiled with floating point emulation support, will then handle the emulation inside the exception handler, and the application will run seamlessly.
+If the Linux kernel is not compiled with FPE support, it raises SIGFPE to the application.
+
+
+The Floating Point Context
+
+
+Floating point unit, uses its own set of registers for doing the floating point arithmetic, f.e. the x87 FPU (coprocessor unit for x86 processor) uses the following registers for floating point arithmetic
+
+
+
+8 data registers (ST0-ST7)
+
+The status register
+
+The control register
+
+The tag word register
+
+The last instruction point register
+
+Last data (operand) pointer register
+
+Opcode register
+
+
+These are registers used specifically for floating point arithmetic and are completely separate from the native x86 registers used for integer arithmetic.
+These constitute the floating point context of the CPU.  This (apart from the native processor context)  need to be saved/restored with each process context switch.  This seems like a big price to pay :-(
+
+
+Cheer up ! we have a smart way to handle this. Read on …
+
+
+Because floating point usage is not very common (in fact many times a process will not execute any floating point instruction in its whole quantum) and because floating point registers are so large and plentiful,
+it does not make sense to save and restore floating point registers on every context switch. Most of the times this save/restore effort will be wasted, as the registers would not have been dirtied.
+x86 designers were smart enough to think about this beforehand and hence they added a bit in the CR0 register which can be used by the operating system to do this save/restore efficiently,
+i.e. floating point registers are saved at context switch out time, only if the going-out process executed some floating point instruction in that quantum, hence modifying the CPU FP registers.
+Similarly, the floating point registers are restored only when the process wants to execute some floating point instruction, hence needing the FP registers.
+
+
+I was referring to the Task Switched bit (bit #3) in the CR0 register. As the name implies, the processor sets this bit on every task switch. Pls note that since Linux does not use the CPU provided task switching facility,
+but instead does the task switch by hand, Linux has to set the TS bit explicitly as part of the task switch. Irrespective of how the TS bit is set,  its significance  is that when this bit is set 
+the CPU generates a Device Not Available (#NM) exception, when a floating point instruction is executed (for the TS bit to have effect the EM bit should be cleared, else irrespective of the TS bit the CPU raises
+the #NM exception for every floating point instruction). This one feature provided by the CPU can be used by the OS to do efficient context switches involving floating point context.
+
+
+
+How ?
+
+
+Lets look at how Linux uses this to do intelligent save and restore of FP registers. Lets first see how and when is the TS bit set in the CR0 register, since if the TS bit is not set,
+the  Device Not Available (#NM) exception will not be generated and we won’t be notified of floating point instruction execution.
+
+The TS bit is set from cpu_init() initially, so that the first process that runs a floating point instruction causes the Device Not Available (#NM) exception.  TS bit is then cleared
+from the Device Not Available (#NM) exception handler, so that no further floating point instructions executing from the current process, in its current quantum, cause the Device Not Available (#NM) exception.
+The TS bit is then set again when the current process is scheduled out. so that the new process executing a floating point instruction also causes the  Device Not Available (#NM) exception.
+This is done from the context switch-out path — __switch_to()->__unlazy_fpu().
+
+
+In short, the Linux kernel wants to be notified of (and only) the first floating point instruction that a process executes in a quantum. It then takes appropriate action to restore the floating point state of that process.
+This ensures that the floating point state of a process is restored (i.e. saved FP state of the process loaded on to the CPU FP state) only (and only) when the process executes at least one floating point instruction.
+If a process does not execute any floating point instruction in a certain quantum, there is no need to restore the saved floating point state of that process. Also, since the saved FPU state of the current process did not change,
+we need not save the FPU state when this process is switched out.  In such case the CPU FPU state remains the same as it was before the current process started running and if that corresponds to the next-to-run process’ FPU state,
+we need not even restore its FPU state, as the CPU’s FPU is already has that state.  What this means is that if a process does not execute any floating point instruction in a certain quantum, we neither restore nor save
+the floating point context of that process. So we incur the FP context save/restore overhead when really required :-)
+
+
+Kernel function math_state_restore() is at the heart of all this. It is called from the Device Not Available (#NM) exception handler, which as we saw before, is called when the TS bit is set and some floating point
+instruction is executed.
+
+
+asmlinkage void math_state_restore(void)
+{
+    ...
+
+    clts();                       // we do not want to be called again in this process quantum
+
+    /*
+     * Now that we are going to use the FPU load this process' FPU state in the FPU
+     */
+    if (unlikely(restore_fpu_checking(tsk))) {
+        stts();
+        force_sig(SIGSEGV, tsk);
+        return;
+    }
+
+    thread->status |= TS_USEDFPU;  // so that __switch_to->unlazy_fpu can save the FP state of this process
+
+    ...
+}
+
+clts() clears the TS bit as we do not want to be called for all floating point instructions, just the first one.  It marks the TS_USEDFPU bit in the current process’ thread->status field.
+This bit is later checked by the context switch-out code to decide whether to save the FP registers as part of the scheduled out task’s context.  Thus Linux kernel ensures that it saves the FP context for a process only
+if that process executes at least one floating point instruction in its last quantum, hence changing its already saved FPU state. This is  the conditional save.
+
+
+This is about the save optimization. The restore optimization is also present in the math_state_restore() function shown above. Note that, unlike other integer registers, we do not restore the FPU state unconditionally
+from the context switch-in code. Instead the FP restore is done from the math_state_restore() function, which signifies that the process has executed some floating point instruction, and hence it is necessary to restore
+the FP state of the process. As we see the floating point state is restored not at the context switch-in time. but  just before the process is going to use the floating point state. This is called the lazy restore.
+
+
+Using floating point in kernel
+
+
+We learnt how Linux uses conditional save and lazy restore techniques  to allow application programs to use the hardware floating point support while avoiding the unnecessary overhead of saving/restoring the FP context
+on every context switch (even when not required). The assumption in the above discussion is that the only way the FP state of the CPU can change is by the application executing floating point instructions. 
+It assumes that the kernel code will not modify the FP state of the CPU. This effectively means that the kernel code cannot use floating point instructions.
+
+
+Well.. to be more precise, we cannot use floating point operations in the kernel just like that. We have to follow some discipline. The good news is that the Linux kernel developers have made it very easy to use floating
+point operations inside the kernel. You just need to surround the floating point code with kernel_fpu_begin() and kernel_fpu_end() and you can safely use floating point operations in the kernel code.
+
+
+
+So what magic do these two functions do. Note how the Linux kernel  had solved the problem of avoiding unneeded save and restore of FP context when scheduling in/out the user processes. In short the Linux kernel
+does the following:
+
+It sets the TS bit in the CR0 register, before a new process can start execution. This is so that the CPU raises the Device Not Available (#NM) exception when that process runs its first floating point instruction.
+The kernel can then do the lazy restore of the floating point context of the process.
+
+From the Device Not Available (#NM) exception handler, it sets the TS_USEDFPU flag in the thread->status field. This can then be used by the context switch out code to conditionally save the floating point state of this process.
+
+If we treat the kernel mode also like another process (i.e. something that is capable of changing the FP state of the CPU), we can extend the above logic to allow kernel to use floating point operations safely.
+
+
+This is exactly what kernel_fpu_begin() and kernel_fpu_end() do.
+
+
+static inline void kernel_fpu_begin(void)
+{
+    struct thread_info *me = current_thread_info();
+    preempt_disable();
+    if (me->status & TS_USEDFPU)
+        __save_init_fpu(me->task);
+    else
+        clts();
+}
+
+static inline void kernel_fpu_end(void)
+{
+    stts();
+    preempt_enable();
+}
+
+So if you want to use some floating point operations in the kernel, which can change the FP state of the CPU, we need to first save the FP state of the current process (__save_init_fpu() does that), but only if the current
+process was doing some floating point operations  (me->status & TS_USEDFPU). Then we need to clear the TS bit, so that the CPU does not raise the Device Not Available (#NM) exception anymore.
+
+Once the kernel is done with the floating point operations, it can call  kernel_fpu_end() which again sets the TS bit. This causes the Device Not Available (#NM) exception when a new process runs some floating point
+operations and hence we need to restore its floating point state (since the kernel modified the CPU FP state).
+
+
+kernel_fpu_begin() and kernel_fpu_end() make sense only if you are using the hardware floating point support in the kernel. For this you will have to compile the kernel (or the module) with -mhard-float option.
+
+
+One more important thing to keep in mind is that while we are inside kernel_fpu_begin() and kernel_fpu_end() we should not sleep. This is because while we are modifying the CPU FP state, we do not want any other context
+to use that FP state.
+
+
+											
+This entry was posted in Uncategorized. Bookmark the permalink.
+← Understanding Linux block IO barriersUsing the VMware workstation emulated serial port on a Linux host →
+12 Responses to Linux Kernel and Floating Point
+ketan bhardwak says:
+July 27, 2010 at 8:31 am
+Wonderful blog and very good explanation of the floating point usage in kernel …
+thanks a ton man !
+Pingback: how to perform floating point operations in linux kernel?
+AswadKannay says:
+May 24, 2011 at 11:10 am
+Hey – I am definitely glad to discover this. Good job!
+denijane says:
+June 10, 2011 at 4:02 pm
+Hello!
+Very nice intro in floating point.
+I have one question, however. I’m interested not so much in the kernel implementation and so on but in hardware floating point calculations in Maple.
+From their help, I understood that in x32 systems, the number of digits carried in the mantissa is approximately 15. Is there a Linux command that will display the number of points that my x64 system has?
+And even though I understand that hardware means hardware, is there any way to manipulate this number. I badly need 2-3 digits more than 15, so if there is any way to improve them…
+admin says:
+June 11, 2011 at 2:59 am
+Hi Denijane,
+
+I’ve not used Maple, but I believe your question is more about how much precision we can get by using floating point in a C program.
+
+The precision that we can get from a floating point representation is decided by the actual number of bits allocated for the mantissa part. The C type “float” has 23 bits (actually 24) and the “double” type has 53 bits (actually 54) for the mantissa part.
+The precision is a measure of the smallest change in the value that we can represent. The smallest change that we can get by changing mantissa is by changing the LSb in the mantissa. For “float” this amounts to 2^-23 (.0000001192092895507) and for “double” it is 2^-53 (.00000000000000011102) in decimal. We can see that the precision is only upto the point where we have the first non-zero digit (as that disallows us from representing any real numbers which lie between them).
+
+So typically, the float precision is 6 decimal digits and double precision is 15 decimal digits.
+
+This does not change between x86 and x86_64 (32 and 64 bit platforms).
+
+We do have a “long double” type in C which has more mantissa bits (64 bits). This should give you a precision of ~19 decimal digits.
+
+You can check the precision on your machine by a simple C program like this.
+
+int main()
+{
+long double ld = 1.0/3;
+double d = 1.0/3;
+float f = 1.0/3;
+
+printf(“sizeof(float)=%d\n”, sizeof(float));
+printf(“sizeof(double)=%d\n”, sizeof(double));
+printf(“sizeof(long double)=%d\n”, sizeof(long double));
+
+printf(“ld=%.20Lf\n”, ld);
+printf(” d=%.20lf\n”, d);
+printf(” f=%.20lf\n”, f);
+}
+
+Since 1/3 is 0.333… ad infinitum, we can see the precision by looking at the place where we get a first non-3. On my machine, “long double” is yielding the same precision as “double”, though it should be capable of more.
+denijane says:
+June 11, 2011 at 2:48 pm
+Hello and many thanks for your reply. :)
+The program works just as promised, but on my computer also double and long double give the same result. Which might not be important, since Maple is written on Java and it obviously uses only double precision floats (8 bytes) . Thus my desperate efforts to increase precision are doomed anyway… :)
+
+“This does not change between x86 and x86_64 (32 and 64 bit platforms).”
+Ok, then, what could change that precision? Sorry if my question is not very smart – I’m not a programmer, but a physicist. I got the impression that this is something built in the CPU. Are there CPUs with higher hfloat precision? Not that it will matter in my case, I’m just curious.
+
+Anyway, thanks for the help, I’m glad that I finally made some progress in at least understanding the problem.
+admin says:
+June 11, 2011 at 11:27 pm
+The precision will depend on how the floating point unit stores floating point numbers. IEEE-754 is the de-facto standard for representing real numbers in computers which can only store binary digits.
+Since CPUs generally work in units of bytes, the IEEE floating point representation was designed to be able to completely represent a floating point number using certain whole number bytes.
+The single precision floating point number can be represented by 4 bytes, while the double precision number uses 8 bytes.
+There is an extended precision representation (long double in C) which needs 10 bytes, but typical implementations use 12 or 16 bytes.
+As you see, different CPU architectures need to confirm to the same standard so it is independent on the CPU architecture.
+denijane says:
+June 14, 2011 at 12:53 pm
+“As you see, different CPU architectures need to confirm to the same standard so it is independent on the CPU architecture.”
+Which translates into “Don’t hope for a change soon”, right? :)
+Ok, thanks for the explanations. They were very useful to me!
+Josenivaldo Benito says:
+June 21, 2011 at 6:17 pm
+Outstanding job!
+
+This is a true class about floats and doubles and also how they are handled by Linux Kernel and x86 CPU.
+
+Thanks a lot man.
+
+In time, this blog could have a RSS feed, this would help follow your experience sharing writings.
+
+Regards,
+Jbenito
+Josenivaldo Benito says:
+June 27, 2011 at 9:10 pm
+Hi,
+
+I just figured out something interesting in your precision test suggestion:
+
+Swtich this:
+long double ld = 1.0/3;
+double d = 1.0/3;
+float f = 1.0/3;
+
+With this:
+long double ld = (long double)1.0/(long double)3;
+double d = (double)1.0/(double)3;
+float f = (float)1.0/(float)3;
+
+Forces GCC to handle literals as specific types. Hence, the result is Long Double having more precision than Double and Float:
+
+sizeof(float)=4
+sizeof(double)=8
+sizeof(long double)=16
+ld=0.333333333333333333342368351437
+d=0.333333333333333314829616256247
+f=0.333333343267440795898437500000
+
+So the ld type have more precision than double as you expected but gcc interpretation of literal numbers in the original code leaded to wrong assumption.
+
+Best regards,
+JBenito.
+admin says:
+June 27, 2011 at 10:35 pm
+Thats a good point. Thanks for pointing out.
+Floating point literals unless qualified by a suffix are of type double. So we can also use the L suffix to get gcc treat the 1.0 in ld as a long double.
+
+long double ld = 1.0L/3;
+excergoorieni says:
+July 8, 2011 at 2:22 pm
+Just read the thread! great work. utell2011.webs.com
+peter says:
+Your comment is awaiting moderation. 
+March 30, 2015 at 9:50 am
+The text is truncated in the right side in article. Can we get text formatted better so the long sentences won’t be hidden?
+Leave a Reply
+
+Your email address will not be published. Required fields are marked *
+
+Name * 
+Email * 
+Website 
+Comment 
+You may use these HTML tags and attributes: <a href="" title=""> <abbr title=""> <acronym title=""> <b> <blockquote cite=""> <cite> <code> <del datetime=""> <em> <i> <q cite=""> <strike> <strong>
+
+
+  
+Archives
+July 2011
+March 2011
+December 2010
+July 2010
+June 2010
+April 2010
+March 2010
+Meta
+Log in
+
