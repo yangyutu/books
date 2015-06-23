@@ -1,0 +1,151 @@
+Public Declare Function GetTickCount Lib "kernel32.dll" () As Long
+
+Public Function MyTimer() As Long
+MyTimer = GetTickCount
+End Function
+'returns an array of n normally distributed variables
+'using box muller transformation
+Public Function NRandVars(N As Single) As Variant
+  ReDim randArr(1 To N) As Variant
+  Dim i, n2, counter As Single
+  n2 = Application.Floor(N / 2, 1)
+  Dim v1, v2, tmp, fac As Double
+  counter = 0
+  For i = 1 To n2
+    Do
+      v1 = 2 * Rnd - 1
+      v2 = 2 * Rnd - 1
+      tmp = v1 * v1 + v2 * v2
+    Loop Until tmp <= 1
+    fac = Sqr(-2 * Log(tmp) / tmp)
+    counter = counter + 1
+    randArr(counter) = v1 * fac
+    counter = counter + 1
+    randArr(counter) = v2 * fac
+  Next i
+  If (N > (n2 * 2)) Then
+    Do
+      v1 = 2 * Rnd - 1
+      v2 = 2 * Rnd - 1
+      tmp = v1 * v1 + v2 * v2
+    Loop Until tmp <= 1
+    fac = Sqr(-2 * Log(tmp) / tmp)
+    counter = counter + 1
+    randArr(counter) = v2 * fac
+  End If
+  NRandVars = randArr
+End Function
+
+//////////////////////////
+
+'returns mean of an array
+Public Function GetMean(x As Variant) As Double
+  Dim i As Single
+  Dim tmpsum As Double
+  tmpsum = 0
+  Dim N As Single
+  N = UBound(x, 1) - LBound(x, 1) + 1
+  For i = LBound(x, 1) To UBound(x, 1)
+    tmpsum = tmpsum + x(i, 1)
+  Next i
+  GetMean = tmpsum / N
+End Function
+'returns variance of an array
+Public Function GetVariance(x As Variant) As Double
+  Dim xbar As Double
+  xbar = GetMean(x)
+  Dim i As Single
+  Dim tmpsum As Double
+  tmpsum = 0
+  Dim N As Single
+  N = UBound(x, 1) - LBound(x, 1) + 1
+  tmpsum = 0
+  Dim tmpval As Double
+  For i = LBound(x, 1) To UBound(x, 1)
+    tmpval = x(i, 1) - xbar
+    tmpsum = tmpsum + tmpval * tmpval
+  Next i
+  GetVariance = tmpsum / (N - 1)
+End Function
+Public Function GetMinimum(x As Variant) As Double
+  Dim minVal As Double
+  minVal = 2 ^ 50
+  For i = LBound(x, 1) To UBound(x, 1)
+    If x(i, 1) < minVal Then
+      minVal = x(i, 1)
+    End If
+  Next i
+  GetMinimum = minVal
+End Function
+
+Public Function GetMaximum(x As Variant) As Double
+  Dim maxVal As Double
+  maxVal = -2 ^ 50
+  For i = LBound(x, 1) To UBound(x, 1)
+    If x(i, 1) > maxVal Then
+      maxVal = x(i, 1)
+    End If
+  Next i
+  GetMaximum = maxVal
+End Function
+
+
+//////////////////////////////////
+
+
+Private Sub CommandButton1_Click()
+  Dim nsteps As Single
+  Dim ticks As Long
+  Dim ticks_count As Long
+
+  Application.Range("D22").Value = 0
+  Application.Range("D20").Value = ""
+  Application.Range("D21").Value = ""
+  S0 = Application.Range("D11").Value 'underlying price 1
+  K = Application.Range("D12").Value 'strike
+  t = Application.Range("D15").Value 'maturity
+  sigma = Application.Range("D13").Value 'volatility
+  r = Application.Range("D14").Value 'risk free rate
+  nsteps = Application.Range("D17").Value 'no of timesteps
+  nsimulations = Application.Range("D18").Value ' no of mc simulations
+  
+  ticks = MyTimer
+  Randomize
+  
+  dt = t / nsteps
+  vsqrdt = sigma * dt ^ 0.5
+  drift = (r - sigma ^ 2 / 2) * dt
+  ReDim callpayoffvec(1 To nsimulations, 1 To 1)
+  ReDim putpayoffvec(1 To nsimulations, 1 To 1)
+  
+  ticks_count = ticks
+  Dim levarage As Integer
+  levarage = 1
+  For i = 1 To nsimulations
+   randvec = NRandVars(nsteps)
+   st = S0
+   curtime = 0
+   For j = 1 To nsteps
+    curtime = curtime + dt
+    randvar = randvec(j)
+    st = st * Exp(drift + vsqrdt * randvar)
+    counter = counter + 1
+   Next j
+   callpayoffvec(i, 1) = Application.Max(st - K, 0)
+   putpayoffvec(i, 1) = Application.Max(K - st, 0)
+   If MyTimer - ticks_count > 1000 * levarage Then
+   Application.Range("D22").Value = MyTimer - ticks
+   ticks_count = MyTimer
+      'If levarage < 5 Then
+      'levarage = levarage + 1
+      'End If
+   End If
+  Next i
+  
+  MC_callprice = Exp(-r * t) * GetMean(callpayoffvec)
+  MC_putprice = Exp(-r * t) * GetMean(putpayoffvec)
+  Application.Range("D20").Value = MC_callprice
+  Application.Range("D21").Value = MC_putprice
+  Application.Range("D22").Value = MyTimer - ticks
+
+End Sub
